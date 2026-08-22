@@ -15,7 +15,7 @@ load_dotenv()
 # We use Gemini 2.5 Flash because it's free, fast, and good at following
 # structured output formats (which we need for tool call parsing).
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.6-flash"
 
 # --- Agent Settings ---
 # Max steps prevents infinite loops. If the agent calls tools 10 times

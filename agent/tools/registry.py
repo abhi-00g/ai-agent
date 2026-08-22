@@ -1,28 +1,16 @@
 """
-Tool Registry
+Tool Registry — Updated for Phase 2
 
-This is the central place where all tools are registered. The registry does
-two things:
-
-1. Stores a mapping of tool_name → tool_object, so the agent loop can look
-   up and run any tool by name.
-
-2. Generates the "Available Tools" section of the system prompt, so the LLM
-   knows what tools exist and when to use each one.
-
-Why a registry instead of a hardcoded list?
-Because it's extensible. In Phase 2 when we add web_search and wikipedia,
-we just import them here and add one line. The agent loop doesn't change at
-all — it already knows how to look up tools by name from the registry.
-
-In interview terms: "The registry decouples tool discovery from tool execution.
-Adding a new tool is a one-line change in the registry — zero changes to the
-agent loop."
+Added WebSearchTool and WikipediaTool to the default registrations.
+That's it — two lines added. The agent loop doesn't change at all.
+This is the power of the registry + Strategy pattern.
 """
 
 from agent.tools.base import BaseTool
 from agent.tools.calculator import CalculatorTool
 from agent.tools.datetime_tool import DateTimeTool
+from agent.tools.web_search import WebSearchTool
+from agent.tools.wikipedia import WikipediaTool
 
 
 class ToolRegistry:
@@ -43,9 +31,8 @@ class ToolRegistry:
         """Register all built-in tools. New tools get added here."""
         self.register(CalculatorTool())
         self.register(DateTimeTool())
-        # Phase 2 will add:
-        # self.register(WebSearchTool())
-        # self.register(WikipediaTool())
+        self.register(WebSearchTool())
+        self.register(WikipediaTool())
         # Phase 3 will add:
         # self.register(MemoryTool())
 
@@ -84,6 +71,8 @@ class ToolRegistry:
             Available Tools:
             - calculator: Use this tool to evaluate mathematical expressions...
             - datetime: Use this tool to get the current date or time...
+            - web_search: Use this tool to search the web...
+            - wikipedia: Use this tool to look up factual information...
         """
         if not self._tools:
             return "No tools available."
