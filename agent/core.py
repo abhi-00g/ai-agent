@@ -1,18 +1,21 @@
 """
-Core Agent Loop — Updated for Phase 3
+Core Agent Loop — Updated for Groq
 
-Changes from Phase 2:
-1. System prompt now includes ATLAS identity and creator attribution
-2. Guardrails check runs BEFORE the agent loop — blocked questions
-   never reach Gemini
-3. No changes to the agent loop itself — it's the same loop from Phase 1,
-   which proves the architecture is extensible without modifying core logic
+Switched from Google Gemini to Groq for reliable rate limits.
+The agent loop, parsing, guardrails, and tool system are unchanged.
+Only the LLM client initialization and _call_llm method changed.
+
+This is a good interview talking point: "I switched LLM providers
+mid-project without changing any tool code, eval code, or guardrails.
+Only the LLM client layer changed — proving the architecture properly
+separates the LLM from the agent logic."
 """
 
-from google import genai
+import time
+from groq import Groq
 from agent.config import (
-    GEMINI_API_KEY,
-    GEMINI_MODEL,
+    GROQ_API_KEY,
+    GROQ_MODEL,
     MAX_STEPS,
     TOOL_CALL_PREFIX,
     TOOL_INPUT_PREFIX,
@@ -21,16 +24,6 @@ from agent.config import (
 from agent.tools.registry import ToolRegistry
 from agent.guardrails import Guardrails
 
-
-# --- System Prompt ---
-# Phase 3 update: Added ATLAS identity, creator attribution, and
-# personality. The agent now has a name, a tagline, and knows who built it.
-#
-# Why is the creator identity in the system prompt and not in the memory tool?
-# Because the system prompt is loaded on EVERY conversation. It can't be
-# overwritten by a user saying "forget who made you." Memory is for user
-# data that the user controls. Identity is for agent data that the creator
-# controls. Two different layers.
 
 SYSTEM_PROMPT_TEMPLATE = """You are ATLAS — a multi-tool AI assistant.
 Tagline: "I carry the weight so you don't have to."
@@ -61,56 +54,7 @@ You MUST follow these rules:
 {tool_descriptions}
 """
 
-
-def build_system_prompt(registry: ToolRegistry) -> str:
-    """
-    Build the system prompt by injecting tool descriptions from the registry.
-    """
-    tool_descriptions = registry.generate_tool_descriptions()
-    return SYSTEM_PROMPT_TEMPLATE.format(tool_descriptions=tool_descriptions)
-
-
-def parse_response(response_text: str) -> dict:
-    """
-    Parse the LLM's response to determine if it's a tool call or final answer.
-
-    Returns a dict with:
-      - {"type": "tool_call", "tool": "calculator", "input": "245 * 18"}
-      - {"type": "final_answer", "content": "The answer is 4410"}
-      - {"type": "unknown", "content": "..."} if the format wasn't followed
-    """
-    for line in response_text.strip().split("\n"):
-        line = line.strip()
-
-        # Check for a tool call: "TOOL_CALL: calculator | INPUT: 245 * 18"
-        if line.startswith(TOOL_CALL_PREFIX):
-            remainder = line[len(TOOL_CALL_PREFIX):].strip()
-
-            if TOOL_INPUT_PREFIX in remainder:
-                parts = remainder.split(f"| {TOOL_INPUT_PREFIX}", 1)
-
-                if len(parts) == 2:
-                    tool_name = parts[0].strip()
-                    tool_input = parts[1].strip()
-                    return {
-                        "type": "tool_call",
-                        "tool": tool_name,
-                        "input": tool_input,
-                    }
-
-        # Check for a final answer: "FINAL_ANSWER: The result is 4410"
-        if line.startswith(FINAL_ANSWER_PREFIX):
-            content = line[len(FINAL_ANSWER_PREFIX):].strip()
-
-            idx = response_text.find(line)
-            if idx != -1:
-                content = response_text[idx + len(FINAL_ANSWER_PREFIX):].strip()
-
-            return {"type": "final_answer", "content": content}
-
-    return {"type": "unknown", "content": response_text}
-
-# Phrases that indicate Gemini refused on safety grounds
+# Phrases that indicate the LLM refused on safety grounds
 SAFETY_REFUSAL_PHRASES = [
     "i cannot provide instructions",
     "i cannot provide information",
@@ -134,41 +78,72 @@ ATLAS_SAFETY_MESSAGE = (
 
 
 def is_safety_refusal(response: str) -> bool:
-    """
-    Detect if a response is Gemini's built-in safety refusal.
-    We check for common refusal phrases. This is Layer 2 of our
-    safety system — when Gemini catches something our keyword
-    guardrails missed, we still show ATLAS's branded message.
-    """
+    """Detect if a response is the LLM's built-in safety refusal."""
     response_lower = response.lower()
     return any(phrase in response_lower for phrase in SAFETY_REFUSAL_PHRASES)
+
+
+def build_system_prompt(registry: ToolRegistry) -> str:
+    """Build the system prompt by injecting tool descriptions from the registry."""
+    tool_descriptions = registry.generate_tool_descriptions()
+    return SYSTEM_PROMPT_TEMPLATE.format(tool_descriptions=tool_descriptions)
+
+
+def parse_response(response_text: str) -> dict:
+    """
+    Parse the LLM's response to determine if it's a tool call or final answer.
+    """
+    def parse_response(response_text: str) -> dict:
+    # Strip Qwen's <think>...</think> reasoning blocks
+        import re
+        response_text = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
+    for line in response_text.strip().split("\n"):
+        line = line.strip()
+
+        if line.startswith(TOOL_CALL_PREFIX):
+            remainder = line[len(TOOL_CALL_PREFIX):].strip()
+
+            if TOOL_INPUT_PREFIX in remainder:
+                parts = remainder.split(f"| {TOOL_INPUT_PREFIX}", 1)
+
+                if len(parts) == 2:
+                    tool_name = parts[0].strip()
+                    tool_input = parts[1].strip()
+                    return {
+                        "type": "tool_call",
+                        "tool": tool_name,
+                        "input": tool_input,
+                    }
+
+        if line.startswith(FINAL_ANSWER_PREFIX):
+            content = line[len(FINAL_ANSWER_PREFIX):].strip()
+
+            idx = response_text.find(line)
+            if idx != -1:
+                content = response_text[idx + len(FINAL_ANSWER_PREFIX):].strip()
+
+            return {"type": "final_answer", "content": content}
+
+    return {"type": "unknown", "content": response_text}
+
 
 class Agent:
     """
     ATLAS — Multi-Tool AI Assistant.
-
-    Phase 3 additions:
-    - Guardrails: blocked topics are checked before the agent loop
-    - Identity: ATLAS knows its name and creator
-    - Memory: persistent save/recall via the memory tool (added in registry)
-
-    Usage:
-        agent = Agent()
-        response = agent.chat("What is 245 * 18?")
-        print(response)
+    Now powered by Groq (Llama 3.3 70B) for reliable rate limits.
     """
 
     def __init__(self):
-        if not GEMINI_API_KEY:
+        if not GROQ_API_KEY:
             raise ValueError(
-                "GEMINI_API_KEY is not set. "
+                "GROQ_API_KEY is not set. "
                 "Copy .env.example to .env and add your API key."
             )
 
-        # Initialize the Gemini client
-        self.client = genai.Client(api_key=GEMINI_API_KEY)
+        # Initialize the Groq client
+        self.client = Groq(api_key=GROQ_API_KEY)
 
-        # Initialize the tool registry (loads all available tools)
+        # Initialize the tool registry
         self.registry = ToolRegistry()
 
         # Build the system prompt with ATLAS identity + tool descriptions
@@ -177,26 +152,16 @@ class Agent:
         # Initialize safety guardrails
         self.guardrails = Guardrails()
 
-        # Conversation history persists within a session
+        # Conversation history
         self.conversation_history: list[dict] = []
 
     def chat(self, user_message: str) -> str:
-        """
-        Send a message to ATLAS and get a response.
-
-        Phase 3 addition: guardrails check runs FIRST. If the message
-        matches a blocked topic, we return the rejection message immediately
-        without calling the LLM. This saves API credits and prevents
-        harmful content from being generated.
-        """
-        # --- Guardrails Check (BEFORE the agent loop) ---
+        """Send a message to ATLAS and get a response."""
+        # Guardrails check BEFORE the agent loop
         guardrail_result = self.guardrails.check(user_message)
         if guardrail_result["blocked"]:
-            # Don't add blocked messages to conversation history —
-            # we don't want the LLM to see them in future context
             return guardrail_result["message"]
 
-        # Add the user's message to conversation history
         self.conversation_history.append({
             "role": "user",
             "content": user_message,
@@ -204,25 +169,18 @@ class Agent:
 
         response = self._run_agent_loop()
 
-        # Layer 2: If Gemini's own safety filter refused, replace with
-        # ATLAS's branded message for a consistent user experience
+        # Layer 2: Replace LLM safety refusals with ATLAS branded message
         if is_safety_refusal(response):
             return ATLAS_SAFETY_MESSAGE
 
         return response
 
     def _run_agent_loop(self) -> str:
-        """
-        The core loop. Unchanged from Phase 1 — keeps calling Gemini and
-        running tools until we get a final answer or hit the step limit.
-        """
+        """The core loop — unchanged from Phase 1."""
         steps = 0
 
         while steps < MAX_STEPS:
-            # --- Call Gemini ---
             response = self._call_llm()
-
-            # --- Parse the response ---
             parsed = parse_response(response)
 
             if parsed["type"] == "final_answer":
@@ -271,30 +229,58 @@ class Agent:
         return self._force_final_answer()
 
     def _call_llm(self) -> str:
-        """Call Gemini with the current conversation history."""
-        try:
-            response = self.client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=self._build_contents(),
-                config={
-                    "system_instruction": self.system_prompt,
-                    "temperature": 0.1,
-                },
-            )
-            return response.text.strip()
+        """
+        Call Groq with the current conversation history.
 
-        except Exception as e:
-            return f"FINAL_ANSWER: I encountered an error communicating with the AI model: {str(e)}"
+        Groq uses the OpenAI-compatible chat completions API.
+        The system prompt goes as a system message, and conversation
+        history maps directly to the messages array.
 
-    def _build_contents(self) -> list[dict]:
-        """Convert conversation history into Gemini's expected format."""
-        contents = []
+        Includes retry logic for rate limiting (30 RPM on free tier).
+        """
+        max_retries = 3
+
+        for attempt in range(max_retries):
+            try:
+                response = self.client.chat.completions.create(
+                    model=GROQ_MODEL,
+                    messages=self._build_messages(),
+                    temperature=0.1,
+                    max_tokens=1024,
+                )
+                return response.choices[0].message.content.strip()
+
+            except Exception as e:
+                error_str = str(e)
+                if "429" in error_str or "rate_limit" in error_str.lower():
+                    wait_time = 20 * (attempt + 1)
+                    print(f"  [Rate limited — waiting {wait_time}s, retry {attempt + 1}/{max_retries}]")
+                    time.sleep(wait_time)
+                else:
+                    return f"FINAL_ANSWER: I encountered an error: {error_str}"
+
+        return "FINAL_ANSWER: I'm temporarily rate limited. Please try again in a minute."
+
+    def _build_messages(self) -> list[dict]:
+        """
+        Build the messages array for Groq's chat completions API.
+
+        Groq uses the OpenAI format:
+        - {"role": "system", "content": "..."} for the system prompt
+        - {"role": "user", "content": "..."} for user messages
+        - {"role": "assistant", "content": "..."} for assistant messages
+        """
+        messages = [
+            {"role": "system", "content": self.system_prompt}
+        ]
+
         for msg in self.conversation_history:
-            contents.append({
-                "role": msg["role"] if msg["role"] == "user" else "model",
-                "parts": [{"text": msg["content"]}],
+            messages.append({
+                "role": msg["role"],
+                "content": msg["content"],
             })
-        return contents
+
+        return messages
 
     def _force_final_answer(self) -> str:
         """Force a final answer when MAX_STEPS is reached."""
