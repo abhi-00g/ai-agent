@@ -1,9 +1,8 @@
 """
-Tool Registry — Updated for Phase 2
+Tool Registry — Updated for Phase 3
 
-Added WebSearchTool and WikipediaTool to the default registrations.
-That's it — two lines added. The agent loop doesn't change at all.
-This is the power of the registry + Strategy pattern.
+Added MemoryTool. One new import, one new register line.
+The pattern continues: adding a tool never touches core.py.
 """
 
 from agent.tools.base import BaseTool
@@ -11,6 +10,7 @@ from agent.tools.calculator import CalculatorTool
 from agent.tools.datetime_tool import DateTimeTool
 from agent.tools.web_search import WebSearchTool
 from agent.tools.wikipedia import WikipediaTool
+from agent.tools.memory import MemoryTool
 
 
 class ToolRegistry:
@@ -33,16 +33,13 @@ class ToolRegistry:
         self.register(DateTimeTool())
         self.register(WebSearchTool())
         self.register(WikipediaTool())
-        # Phase 3 will add:
-        # self.register(MemoryTool())
+        self.register(MemoryTool())
 
     def register(self, tool: BaseTool):
         """
         Add a tool to the registry.
 
         Raises ValueError if a tool with the same name is already registered.
-        This prevents silent overwrites — if two tools accidentally share a
-        name, you want to know immediately, not debug mysterious behavior later.
         """
         if tool.name in self._tools:
             raise ValueError(
@@ -62,17 +59,6 @@ class ToolRegistry:
     def generate_tool_descriptions(self) -> str:
         """
         Generate the tool description block for the system prompt.
-
-        This is what the LLM sees, so the format matters. Each tool is listed
-        with its name and description, making it clear to the LLM what's
-        available and when to use each tool.
-
-        Output looks like:
-            Available Tools:
-            - calculator: Use this tool to evaluate mathematical expressions...
-            - datetime: Use this tool to get the current date or time...
-            - web_search: Use this tool to search the web...
-            - wikipedia: Use this tool to look up factual information...
         """
         if not self._tools:
             return "No tools available."

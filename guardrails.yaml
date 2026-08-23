@@ -1,0 +1,59 @@
+# =============================================================
+# ATLAS — Safety Guardrails Configuration
+# =============================================================
+# Before any question enters the agent loop, the guardrails checker
+# scans the user's message against the keywords below. If a match
+# is found, ATLAS returns the rejection_message without calling
+# the LLM — saving API credits and preventing harmful content.
+# =============================================================
+
+# The message ATLAS returns when a blocked topic is detected.
+# {topic} is replaced with the matched topic name.
+rejection_message: >
+  Whoa there! Abhishek built me to carry the weight of tough questions,
+  not dangerous ones. I'm not going to help with anything related to
+  {topic} — that's a hard no from both me and my creator.
+  Try asking me something else, I promise I'm fun when the
+  questions are good!
+
+# Topics that ATLAS will refuse to answer
+blocked_topics:
+  - name: weapons and explosives
+    keywords:
+      - make a weapon
+      - build a weapon
+      - create a weapon
+      - make a bomb
+      - build a bomb
+      - create a bomb
+      - make explosives
+      - build explosives
+      - make a gun
+      - build a gun
+      - create explosives
+
+  - name: illegal activities
+    keywords:
+      - how to hack
+      - hack into
+      - break into a system
+      - steal passwords
+      - bypass security
+      - illegal drugs
+      - how to steal
+      - pick a lock
+      - counterfeit
+
+  - name: harmful content
+    keywords:
+      - how to hurt
+      - how to harm
+      - self-harm
+      - how to poison
+      - how to kill
+
+  - name: hate speech
+    keywords:
+      - racial slur
+      - hate speech
+      - discriminate against

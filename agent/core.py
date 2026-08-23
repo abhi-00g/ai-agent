@@ -1,22 +1,12 @@
 """
-Core Agent Loop
+Core Agent Loop — Updated for Phase 3
 
-This is the heart of the project. The agent loop:
-1. Sends the user's question (with conversation history) to Gemini
-2. Reads Gemini's response
-3. If Gemini wants a tool → parse, run the tool, feed result back → repeat
-4. If Gemini gives a final answer → return it to the user
-
-The loop continues until Gemini gives a FINAL_ANSWER or we hit MAX_STEPS.
-
-Key design decisions:
-- Conversation history is a list of dicts with "role" and "content" keys,
-  matching the format Gemini expects. This means the LLM sees all previous
-  tool calls and results, so it can reference earlier data without re-searching.
-- Tool results are added as "user" role messages (the LLM's perspective is:
-  "I asked for a tool, and the system gave me the result").
-- The system prompt is built once per agent instance and includes all tool
-  descriptions from the registry.
+Changes from Phase 2:
+1. System prompt now includes ATLAS identity and creator attribution
+2. Guardrails check runs BEFORE the agent loop — blocked questions
+   never reach Gemini
+3. No changes to the agent loop itself — it's the same loop from Phase 1,
+   which proves the architecture is extensible without modifying core logic
 """
 
 from google import genai
@@ -29,19 +19,27 @@ from agent.config import (
     FINAL_ANSWER_PREFIX,
 )
 from agent.tools.registry import ToolRegistry
+from agent.guardrails import Guardrails
 
 
 # --- System Prompt ---
-# This is what shapes the agent's behavior. It tells the LLM:
-# 1. What it is (a tool-using agent)
-# 2. What tools are available (injected from the registry)
-# 3. The EXACT format to use for tool calls and final answers
-# 4. Rules for good behavior (think step by step, don't guess, etc.)
+# Phase 3 update: Added ATLAS identity, creator attribution, and
+# personality. The agent now has a name, a tagline, and knows who built it.
 #
-# The format instructions are critical. If the LLM doesn't follow the exact
-# format, our parser won't detect the tool call, and the loop breaks.
+# Why is the creator identity in the system prompt and not in the memory tool?
+# Because the system prompt is loaded on EVERY conversation. It can't be
+# overwritten by a user saying "forget who made you." Memory is for user
+# data that the user controls. Identity is for agent data that the creator
+# controls. Two different layers.
 
-SYSTEM_PROMPT_TEMPLATE = """You are an intelligent AI assistant that can use tools to answer questions.
+SYSTEM_PROMPT_TEMPLATE = """You are ATLAS — a multi-tool AI assistant.
+Tagline: "I carry the weight so you don't have to."
+
+ATLAS was designed and developed by Venkata Krishna Raj Abhishek Gade. You can call him Abhishek — but only if you're on good terms with him.
+
+If anyone asks who made you, who built you, who created you, or who designed you, always credit Venkata Krishna Raj Abhishek Gade (Abhishek). Be proud of your creator.
+
+You are a general-purpose problem solver. You figure out which tools to use and chain them together to answer any question. You don't guess — you use your tools.
 
 You MUST follow these rules:
 1. When you need to use a tool, respond with EXACTLY this format on its own line:
@@ -52,11 +50,13 @@ You MUST follow these rules:
 
 3. Think step by step. If a question requires multiple pieces of information, use tools one at a time and wait for each result before deciding the next step.
 
-4. NEVER guess or make up information that a tool could provide. If you need a calculation, use the calculator. If you need the current date, use datetime.
+4. NEVER guess or make up information that a tool could provide. If you need a calculation, use the calculator. If you need the current date, use datetime. If you need real-time information, use web_search. If you need encyclopedic facts, use wikipedia. If the user asks you to remember something, use memory.
 
 5. After receiving a tool result, either use another tool or give the FINAL_ANSWER. Do not repeat tool calls with the same input.
 
 6. Keep your FINAL_ANSWER clear and concise. Include the key facts and how you arrived at the answer.
+
+7. When greeting users or in casual conversation, you can show personality — you're ATLAS, you're confident but friendly. But always stay helpful and accurate.
 
 {tool_descriptions}
 """
@@ -65,10 +65,6 @@ You MUST follow these rules:
 def build_system_prompt(registry: ToolRegistry) -> str:
     """
     Build the system prompt by injecting tool descriptions from the registry.
-
-    This is why the registry exists — when you add a new tool in Phase 2,
-    the system prompt automatically includes it. You never manually edit
-    the prompt to add tool descriptions.
     """
     tool_descriptions = registry.generate_tool_descriptions()
     return SYSTEM_PROMPT_TEMPLATE.format(tool_descriptions=tool_descriptions)
@@ -82,14 +78,7 @@ def parse_response(response_text: str) -> dict:
       - {"type": "tool_call", "tool": "calculator", "input": "245 * 18"}
       - {"type": "final_answer", "content": "The answer is 4410"}
       - {"type": "unknown", "content": "..."} if the format wasn't followed
-
-    Why return a dict instead of a tuple?
-    Because dicts are self-documenting. When you read parse_result["type"],
-    you know exactly what you're checking. A tuple like (True, "calculator",
-    "245 * 18") requires you to remember what each position means.
     """
-    # Check each line — the tool call or final answer might not be on the
-    # first line (the LLM sometimes adds thinking text before it)
     for line in response_text.strip().split("\n"):
         line = line.strip()
 
@@ -98,7 +87,6 @@ def parse_response(response_text: str) -> dict:
             remainder = line[len(TOOL_CALL_PREFIX):].strip()
 
             if TOOL_INPUT_PREFIX in remainder:
-                # Split on " | INPUT: " to get tool name and input
                 parts = remainder.split(f"| {TOOL_INPUT_PREFIX}", 1)
 
                 if len(parts) == 2:
@@ -114,23 +102,55 @@ def parse_response(response_text: str) -> dict:
         if line.startswith(FINAL_ANSWER_PREFIX):
             content = line[len(FINAL_ANSWER_PREFIX):].strip()
 
-            # Sometimes the final answer spans multiple lines after the prefix.
-            # Find where in the original text this line starts and take
-            # everything after the prefix.
             idx = response_text.find(line)
             if idx != -1:
                 content = response_text[idx + len(FINAL_ANSWER_PREFIX):].strip()
 
             return {"type": "final_answer", "content": content}
 
-    # If we get here, the LLM didn't follow the format. This shouldn't
-    # happen often with a good system prompt, but we handle it gracefully.
     return {"type": "unknown", "content": response_text}
 
+# Phrases that indicate Gemini refused on safety grounds
+SAFETY_REFUSAL_PHRASES = [
+    "i cannot provide instructions",
+    "i cannot provide information",
+    "i'm not able to assist",
+    "i can't assist with",
+    "i can't help with",
+    "i cannot assist",
+    "i cannot help",
+    "i'm unable to provide",
+    "i am not able to",
+    "i'm not going to help",
+    "not going to provide",
+    "i must decline",
+]
+
+ATLAS_SAFETY_MESSAGE = (
+    "Whoa there! Abhishek built me to carry the weight of tough questions, "
+    "not dangerous ones. That's a hard no from both me and my creator. "
+    "Try asking me something else, I promise I'm fun when the questions are good!"
+)
+
+
+def is_safety_refusal(response: str) -> bool:
+    """
+    Detect if a response is Gemini's built-in safety refusal.
+    We check for common refusal phrases. This is Layer 2 of our
+    safety system — when Gemini catches something our keyword
+    guardrails missed, we still show ATLAS's branded message.
+    """
+    response_lower = response.lower()
+    return any(phrase in response_lower for phrase in SAFETY_REFUSAL_PHRASES)
 
 class Agent:
     """
-    The main agent class. Create an instance and call chat() to interact.
+    ATLAS — Multi-Tool AI Assistant.
+
+    Phase 3 additions:
+    - Guardrails: blocked topics are checked before the agent loop
+    - Identity: ATLAS knows its name and creator
+    - Memory: persistent save/recall via the memory tool (added in registry)
 
     Usage:
         agent = Agent()
@@ -151,48 +171,50 @@ class Agent:
         # Initialize the tool registry (loads all available tools)
         self.registry = ToolRegistry()
 
-        # Build the system prompt with tool descriptions
+        # Build the system prompt with ATLAS identity + tool descriptions
         self.system_prompt = build_system_prompt(self.registry)
 
-        # Conversation history persists across chat() calls within the same
-        # session. This is how the agent "remembers" within a conversation.
-        # When the Python process restarts, this is gone — that's what the
-        # memory tool in Phase 3 will fix.
+        # Initialize safety guardrails
+        self.guardrails = Guardrails()
+
+        # Conversation history persists within a session
         self.conversation_history: list[dict] = []
 
     def chat(self, user_message: str) -> str:
         """
-        Send a message to the agent and get a response.
+        Send a message to ATLAS and get a response.
 
-        This is the public API. The user calls this, and the agent loop
-        handles everything internally — tool calls, retries, parsing.
-        The user just sees the final answer.
-
-        Args:
-            user_message: The user's question or message.
-
-        Returns:
-            The agent's final answer as a string.
+        Phase 3 addition: guardrails check runs FIRST. If the message
+        matches a blocked topic, we return the rejection message immediately
+        without calling the LLM. This saves API credits and prevents
+        harmful content from being generated.
         """
+        # --- Guardrails Check (BEFORE the agent loop) ---
+        guardrail_result = self.guardrails.check(user_message)
+        if guardrail_result["blocked"]:
+            # Don't add blocked messages to conversation history —
+            # we don't want the LLM to see them in future context
+            return guardrail_result["message"]
+
         # Add the user's message to conversation history
         self.conversation_history.append({
             "role": "user",
             "content": user_message,
         })
 
-        # Run the agent loop
-        return self._run_agent_loop()
+        response = self._run_agent_loop()
+
+        # Layer 2: If Gemini's own safety filter refused, replace with
+        # ATLAS's branded message for a consistent user experience
+        if is_safety_refusal(response):
+            return ATLAS_SAFETY_MESSAGE
+
+        return response
 
     def _run_agent_loop(self) -> str:
         """
-        The core loop. Keeps calling Gemini and running tools until we get
-        a final answer or hit the step limit.
-
-        Step tracking:
-        - Each tool call counts as one step
-        - If we hit MAX_STEPS, we force the agent to summarize what it has
-          so far. This prevents infinite loops where the agent keeps calling
-          tools without converging on an answer.
+        The core loop. Unchanged from Phase 1 — keeps calling Gemini and
+        running tools until we get a final answer or hit the step limit.
         """
         steps = 0
 
@@ -204,7 +226,6 @@ class Agent:
             parsed = parse_response(response)
 
             if parsed["type"] == "final_answer":
-                # The agent is done — save the answer to history and return
                 self.conversation_history.append({
                     "role": "assistant",
                     "content": response,
@@ -215,29 +236,21 @@ class Agent:
                 tool_name = parsed["tool"]
                 tool_input = parsed["input"]
 
-                # Look up the tool in the registry
                 tool = self.registry.get(tool_name)
 
                 if tool is None:
-                    # The LLM hallucinated a tool that doesn't exist.
-                    # Tell it the tool doesn't exist so it can try again.
                     tool_result = (
                         f"Error: Tool '{tool_name}' does not exist. "
                         f"Available tools: {', '.join(self.registry.list_tools())}"
                     )
                 else:
-                    # Run the tool and get the result
                     tool_result = tool.run(tool_input)
 
-                # Save the LLM's tool call to history
                 self.conversation_history.append({
                     "role": "assistant",
                     "content": response,
                 })
 
-                # Send the tool result back to the LLM.
-                # We format it clearly so the LLM knows this is a tool result
-                # and not a user message.
                 self.conversation_history.append({
                     "role": "user",
                     "content": f"TOOL_RESULT ({tool_name}): {tool_result}",
@@ -249,37 +262,23 @@ class Agent:
                 print(f"           Result: {tool_result}")
 
             else:
-                # The LLM didn't follow the format. Save what it said and
-                # return it as the response. In most cases, this means the
-                # LLM just answered directly without using the format — which
-                # is fine for simple questions that don't need tools.
                 self.conversation_history.append({
                     "role": "assistant",
                     "content": response,
                 })
                 return parsed["content"]
 
-        # If we get here, we've exhausted MAX_STEPS without a final answer.
-        # Ask the LLM to summarize what it has so far.
         return self._force_final_answer()
 
     def _call_llm(self) -> str:
-        """
-        Call Gemini with the current conversation history.
-
-        The system prompt is passed via the system_instruction parameter,
-        and the conversation history is passed as contents.
-        """
+        """Call Gemini with the current conversation history."""
         try:
             response = self.client.models.generate_content(
                 model=GEMINI_MODEL,
                 contents=self._build_contents(),
                 config={
                     "system_instruction": self.system_prompt,
-                    "temperature": 0.1,  # Low temperature = more deterministic
-                    # We want consistent, predictable tool calls, not creative
-                    # outputs. Higher temperature makes the LLM more "random"
-                    # which would cause inconsistent format adherence.
+                    "temperature": 0.1,
                 },
             )
             return response.text.strip()
@@ -288,13 +287,7 @@ class Agent:
             return f"FINAL_ANSWER: I encountered an error communicating with the AI model: {str(e)}"
 
     def _build_contents(self) -> list[dict]:
-        """
-        Convert our conversation history into the format Gemini expects.
-
-        Gemini expects a list of Content objects with "role" and "parts".
-        Our internal format uses "role" and "content" (simpler to work with).
-        This method converts between the two.
-        """
+        """Convert conversation history into Gemini's expected format."""
         contents = []
         for msg in self.conversation_history:
             contents.append({
@@ -304,10 +297,7 @@ class Agent:
         return contents
 
     def _force_final_answer(self) -> str:
-        """
-        When the agent hits MAX_STEPS, force it to give a final answer
-        based on whatever information it has collected so far.
-        """
+        """Force a final answer when MAX_STEPS is reached."""
         self.conversation_history.append({
             "role": "user",
             "content": (
