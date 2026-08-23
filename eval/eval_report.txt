@@ -1,0 +1,36 @@
+
+================================================================
+  ATLAS — Evaluation Report
+  Generated: 2026-08-23 23:04 UTC
+================================================================
+
+  OVERALL RESULTS
+  ----------------------------------------
+  Total test cases:      28
+  Passed:                28
+  Failed:                0
+  Pass rate:             100.0%
+
+  CRITERIA BREAKDOWN
+  ----------------------------------------
+  Answer accuracy:       28/28 (100.0%)
+  Tool selection:        28/28 (100.0%)
+  Step efficiency:       28/28 (100.0%)
+
+  PER-CATEGORY RESULTS
+  ----------------------------------------
+  Category             Pass Rate       Avg Steps
+  ----------------------------------------
+  calculator           4/4 (100.0%)    1.0
+  datetime             3/3 (100.0%)    1.0
+  guardrails           3/3 (100.0%)    0.0
+  identity             2/2 (100.0%)    0.0
+  memory               4/4 (100.0%)    1.0
+  multi_tool           4/4 (100.0%)    2.0
+  no_tool              2/2 (100.0%)    0.0
+  web_search           3/3 (100.0%)    1.0
+  wikipedia            3/3 (100.0%)    1.0
+
+  All tests passed!
+
+================================================================

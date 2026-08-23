@@ -1,9 +1,14 @@
 """
 Configuration for the AI Agent.
 
-All settings live here so they're easy to find and change.
-In later phases, some of these will come from environment variables
-or a YAML config file.
+Switched from Google Gemini to Groq in Phase 4.
+Why? Gemini's free tier caps at 20 RPD on some accounts, making it
+impossible to run a 28-test eval suite. Groq offers 30 RPM and
+14,400 RPD on the free tier — no credit card required.
+
+Groq runs open-source models (Llama, Mixtral) on custom LPU hardware,
+delivering sub-second inference. We use Llama 3.3 70B which is strong
+at structured output and tool-calling patterns.
 """
 
 import os
@@ -12,23 +17,13 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- LLM Settings ---
-# We use Gemini 2.5 Flash because it's free, fast, and good at following
-# structured output formats (which we need for tool call parsing).
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL = "gemini-3.6-flash"
+GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = "qwen/qwen3.6-27b"
 
 # --- Agent Settings ---
-# Max steps prevents infinite loops. If the agent calls tools 10 times
-# without reaching a final answer, something is wrong — force it to stop.
 MAX_STEPS = 10
 
 # --- Tool Call Format ---
-# This is the format we tell the LLM to use when it wants to call a tool.
-# We chose a simple text format over JSON because it's easier to parse
-# and Gemini follows it reliably. The format is:
-#   TOOL_CALL: tool_name | INPUT: the input to the tool
-# When the agent has a final answer and doesn't need any more tools:
-#   FINAL_ANSWER: the answer text
 TOOL_CALL_PREFIX = "TOOL_CALL:"
 TOOL_INPUT_PREFIX = "INPUT:"
 FINAL_ANSWER_PREFIX = "FINAL_ANSWER:"
