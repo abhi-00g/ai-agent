@@ -6,7 +6,7 @@ A multi-tool AI agent that autonomously chains tools together to answer complex 
 
 **Live Demo:** [Try ATLAS](https://ai-agent-kqppru9yiggruzhppdilfb.streamlit.app) · **Cost Dashboard:** [View Telemetry](https://ai-cost-dashboard-rust.vercel.app)
 
-> **Note:** ATLAS runs on Groq's free tier. If you hit a rate limit, wait a few seconds and try again.
+> **Note:** The app runs on Streamlit Cloud's free tier, which sleeps after inactivity. The first load may take 30–60 seconds. Once running, responses are fast via Groq's sub-second inference.
 
 ---
 
