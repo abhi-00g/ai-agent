@@ -1,34 +1,18 @@
 """
-Memory Tool
+Memory Tool — Updated with Fuzzy Key Matching
 
-Provides persistent memory across sessions using a JSON file.
-The agent can save facts (like the user's name or email) and recall
-them later — even after the Python process restarts.
+Problem solved: The LLM might save as "favorite color" but recall as
+"favorite_color" or "fav color". Without fuzzy matching, the recall
+would fail even though the data exists.
 
-Two operations:
-  - save: stores a key-value pair (e.g., save name = Abhishek)
-  - recall: retrieves a value by key (e.g., recall name)
+Solution: On recall, if an exact match isn't found, we normalize both
+the query and stored keys (strip spaces, underscores, common words)
+and try again.
 
-There's also a third implicit operation: "recall all" or "what do you
-remember" which dumps everything stored.
-
-Why JSON instead of a database?
-  - This project already demonstrates PostgreSQL expertise via the
-    AI Cost Dashboard (SQLAlchemy, Alembic, asyncpg).
-  - For a single-user agent, JSON is the right tool for the job.
-  - In an interview: "I chose JSON because the access pattern is simple
-    key-value reads and writes for a single user. If I were scaling to
-    multiple users, I'd move to PostgreSQL with per-user partitioning."
-
-Design decisions:
-  - The file is created on first save, not on startup. This avoids
-    creating empty files that clutter the project.
-  - Every save immediately writes to disk (not batched). This ensures
-    data survives even if the process crashes mid-conversation.
-  - Keys are case-insensitive (stored lowercase) to prevent the user
-    from accidentally saving "Name" and "name" as separate entries.
-  - The tool parses natural language inputs like "save my name is Abhishek"
-    into key-value pairs. The LLM sends free-form text, not structured JSON.
+Interview talking point: "I discovered during testing that the LLM
+would format memory keys inconsistently — saving as 'favorite color'
+but recalling as 'favorite_color'. I fixed it by adding key
+normalization and fuzzy matching on recall."
 """
 
 import json
@@ -36,10 +20,32 @@ import os
 from agent.tools.base import BaseTool
 
 
-# Where the memory file lives. The memory/ directory is gitignored
-# so personal data never gets committed to the repo.
 MEMORY_DIR = "memory"
 MEMORY_FILE = os.path.join(MEMORY_DIR, "user_memory.json")
+
+# Words to strip during normalization — these add no meaning to keys
+NOISE_WORDS = {"my", "the", "a", "an", "is", "are", "was", "that", "this"}
+
+
+def _normalize_key(key: str) -> str:
+    """
+    Normalize a key for fuzzy matching.
+
+    Steps:
+    1. Lowercase
+    2. Replace underscores and hyphens with spaces
+    3. Remove noise words (my, the, a, etc.)
+    4. Collapse multiple spaces
+    5. Strip whitespace
+
+    "my_favorite_color" → "favorite color"
+    "favorite color"    → "favorite color"
+    "My Favorite Color" → "favorite color"
+    """
+    key = key.lower()
+    key = key.replace("_", " ").replace("-", " ")
+    words = [w for w in key.split() if w not in NOISE_WORDS]
+    return " ".join(words).strip()
 
 
 class MemoryTool(BaseTool):
@@ -48,9 +54,9 @@ class MemoryTool(BaseTool):
 
     Usage by the LLM:
         TOOL_CALL: memory | INPUT: save name = Abhishek
-        TOOL_CALL: memory | INPUT: save email = gade.venk@northeastern.edu
         TOOL_CALL: memory | INPUT: recall name
         TOOL_CALL: memory | INPUT: recall all
+        TOOL_CALL: memory | INPUT: forget name
     """
 
     @property
@@ -73,7 +79,6 @@ class MemoryTool(BaseTool):
         cleaned = tool_input.strip()
 
         try:
-            # Determine the operation: save or recall
             lower = cleaned.lower()
 
             if lower.startswith("save"):
@@ -81,7 +86,6 @@ class MemoryTool(BaseTool):
             elif lower.startswith("recall"):
                 return self._recall(cleaned[6:].strip())
             elif lower.startswith("delete") or lower.startswith("forget"):
-                # Bonus: let the agent delete memories too
                 key_part = cleaned.split(maxsplit=1)
                 if len(key_part) > 1:
                     return self._delete(key_part[1].strip())
@@ -97,18 +101,7 @@ class MemoryTool(BaseTool):
             return f"Error with memory operation: {str(e)}"
 
     def _save(self, input_str: str) -> str:
-        """
-        Parse and save a key-value pair.
-
-        Accepts formats like:
-          - "name = Abhishek"
-          - "name: Abhishek"
-          - "name is Abhishek"
-
-        The flexibility matters because the LLM won't always use the exact
-        same format. By supporting multiple delimiters, we reduce parse failures.
-        """
-        # Try splitting on common delimiters
+        """Parse and save a key-value pair."""
         key, value = None, None
 
         for delimiter in ["=", ":", " is "]:
@@ -125,7 +118,6 @@ class MemoryTool(BaseTool):
                 "Use format: 'save key = value' (e.g., 'save name = Abhishek')."
             )
 
-        # Load existing memory, add new entry, write back
         memory = self._load_memory()
         memory[key] = value
         self._write_memory(memory)
@@ -134,7 +126,11 @@ class MemoryTool(BaseTool):
 
     def _recall(self, input_str: str) -> str:
         """
-        Recall a value by key, or dump all memories.
+        Recall a value by key with fuzzy matching.
+
+        Match priority:
+        1. Exact match (case-insensitive)
+        2. Normalized match (strip noise words, underscores)
         """
         memory = self._load_memory()
 
@@ -143,18 +139,22 @@ class MemoryTool(BaseTool):
 
         key = input_str.strip().lower()
 
-        # "recall all" or "recall everything" dumps all memories
         if key in ("all", "everything", ""):
             lines = ["Here's everything I remember:"]
             for k, v in memory.items():
                 lines.append(f"  - {k}: {v}")
             return "\n".join(lines)
 
-        # Look up specific key
+        # Priority 1: Exact match
         if key in memory:
             return f"{key}: {memory[key]}"
 
-        # Key not found — tell the LLM what IS available
+        # Priority 2: Normalized match
+        normalized_query = _normalize_key(key)
+        for stored_key, value in memory.items():
+            if _normalize_key(stored_key) == normalized_query:
+                return f"{stored_key}: {value}"
+
         available = ", ".join(memory.keys())
         return (
             f"No memory found for '{key}'. "
@@ -162,22 +162,27 @@ class MemoryTool(BaseTool):
         )
 
     def _delete(self, input_str: str) -> str:
-        """Delete a memory by key."""
+        """Delete a memory by key with fuzzy matching."""
         memory = self._load_memory()
         key = input_str.strip().lower()
 
+        # Exact match
         if key in memory:
             del memory[key]
             self._write_memory(memory)
             return f"Forgotten: {key}"
 
+        # Normalized match
+        normalized_query = _normalize_key(key)
+        for stored_key in list(memory.keys()):
+            if _normalize_key(stored_key) == normalized_query:
+                del memory[stored_key]
+                self._write_memory(memory)
+                return f"Forgotten: {stored_key}"
+
         return f"No memory found for '{key}', nothing to forget."
 
     def _load_memory(self) -> dict:
-        """
-        Load the memory file from disk. Returns empty dict if file
-        doesn't exist yet (first-time use).
-        """
         if not os.path.exists(MEMORY_FILE):
             return {}
 
@@ -185,19 +190,9 @@ class MemoryTool(BaseTool):
             with open(MEMORY_FILE, "r") as f:
                 return json.load(f)
         except (json.JSONDecodeError, IOError):
-            # If the file is corrupted, start fresh rather than crash
             return {}
 
     def _write_memory(self, memory: dict):
-        """
-        Write memory dict to disk. Creates the memory/ directory if
-        it doesn't exist.
-
-        We write immediately on every save (not batched) because:
-        1. The user expects "remember X" to actually persist
-        2. If the process crashes, we don't lose unsaved data
-        3. The file is tiny — writing is effectively instant
-        """
         os.makedirs(MEMORY_DIR, exist_ok=True)
 
         with open(MEMORY_FILE, "w") as f:

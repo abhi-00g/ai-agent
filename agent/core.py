@@ -1,17 +1,16 @@
 """
-Core Agent Loop — Updated for Groq
+Core Agent Loop — Phase 5
 
-Switched from Google Gemini to Groq for reliable rate limits.
-The agent loop, parsing, guardrails, and tool system are unchanged.
-Only the LLM client initialization and _call_llm method changed.
-
-This is a good interview talking point: "I switched LLM providers
-mid-project without changing any tool code, eval code, or guardrails.
-Only the LLM client layer changed — proving the architecture properly
-separates the LLM from the agent logic."
+Additions:
+- Telemetry: every Groq call is logged to the AI Cost Dashboard via
+  llm_cost_sdk. Token counts, latency, and cost are captured automatically.
+- Graceful fallback: if the dashboard is unconfigured or unreachable,
+  the agent works normally. Observability never breaks the application.
 """
 
+import re
 import time
+import logging
 from groq import Groq
 from agent.config import (
     GROQ_API_KEY,
@@ -20,9 +19,73 @@ from agent.config import (
     TOOL_CALL_PREFIX,
     TOOL_INPUT_PREFIX,
     FINAL_ANSWER_PREFIX,
+    COST_DASHBOARD_API_KEY,
+    COST_DASHBOARD_ENDPOINT,
+    QWEN_INPUT_PRICE_PER_TOKEN,
+    QWEN_OUTPUT_PRICE_PER_TOKEN,
 )
 from agent.tools.registry import ToolRegistry
 from agent.guardrails import Guardrails
+
+logger = logging.getLogger("atlas")
+
+# --- Telemetry Setup ---
+# Initialize the cost tracker only if dashboard credentials are configured.
+# This is the same pattern used in the RAG project — observability is opt-in.
+_cost_tracker = None
+
+if COST_DASHBOARD_API_KEY and COST_DASHBOARD_ENDPOINT:
+    try:
+        from llm_cost_sdk import CostTracker
+        _cost_tracker = CostTracker(
+            api_key=COST_DASHBOARD_API_KEY,
+            endpoint=COST_DASHBOARD_ENDPOINT,
+        )
+        logger.info("Cost Dashboard telemetry enabled.")
+    except ImportError:
+        logger.warning(
+            "llm_cost_sdk not installed. Telemetry disabled. "
+            "Install with: pip install llm-cost-sdk"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to initialize cost tracker: {e}")
+
+
+def _send_telemetry(
+    input_tokens: int,
+    output_tokens: int,
+    latency_ms: int,
+    feature: str = "agent",
+    status: str = "success",
+    error_message: str | None = None,
+):
+    """
+    Send telemetry to the AI Cost Dashboard.
+
+    Calculates cost using Groq's pricing for Qwen 3.6 27B.
+    Never raises — if sending fails, it's logged and ignored.
+    """
+    if not _cost_tracker:
+        return
+
+    try:
+        cost = (
+            input_tokens * QWEN_INPUT_PRICE_PER_TOKEN
+            + output_tokens * QWEN_OUTPUT_PRICE_PER_TOKEN
+        )
+
+        _cost_tracker.log(
+            model=GROQ_MODEL,
+            provider="groq",
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            latency_ms=latency_ms,
+            feature=feature,
+            status=status,
+            error_message=error_message,
+        )
+    except Exception as e:
+        logger.debug(f"Telemetry send failed (non-critical): {e}")
 
 
 SYSTEM_PROMPT_TEMPLATE = """You are ATLAS — a multi-tool AI assistant.
@@ -54,7 +117,6 @@ You MUST follow these rules:
 {tool_descriptions}
 """
 
-# Phrases that indicate the LLM refused on safety grounds
 SAFETY_REFUSAL_PHRASES = [
     "i cannot provide instructions",
     "i cannot provide information",
@@ -90,13 +152,10 @@ def build_system_prompt(registry: ToolRegistry) -> str:
 
 
 def parse_response(response_text: str) -> dict:
-    """
-    Parse the LLM's response to determine if it's a tool call or final answer.
-    """
-    def parse_response(response_text: str) -> dict:
+    """Parse the LLM's response to determine if it's a tool call or final answer."""
     # Strip Qwen's <think>...</think> reasoning blocks
-        import re
-        response_text = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
+    response_text = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
+
     for line in response_text.strip().split("\n"):
         line = line.strip()
 
@@ -130,7 +189,7 @@ def parse_response(response_text: str) -> dict:
 class Agent:
     """
     ATLAS — Multi-Tool AI Assistant.
-    Now powered by Groq (Llama 3.3 70B) for reliable rate limits.
+    Powered by Groq (Qwen 3.6 27B) with optional Cost Dashboard telemetry.
     """
 
     def __init__(self):
@@ -140,24 +199,14 @@ class Agent:
                 "Copy .env.example to .env and add your API key."
             )
 
-        # Initialize the Groq client
         self.client = Groq(api_key=GROQ_API_KEY)
-
-        # Initialize the tool registry
         self.registry = ToolRegistry()
-
-        # Build the system prompt with ATLAS identity + tool descriptions
         self.system_prompt = build_system_prompt(self.registry)
-
-        # Initialize safety guardrails
         self.guardrails = Guardrails()
-
-        # Conversation history
         self.conversation_history: list[dict] = []
 
     def chat(self, user_message: str) -> str:
         """Send a message to ATLAS and get a response."""
-        # Guardrails check BEFORE the agent loop
         guardrail_result = self.guardrails.check(user_message)
         if guardrail_result["blocked"]:
             return guardrail_result["message"]
@@ -169,7 +218,6 @@ class Agent:
 
         response = self._run_agent_loop()
 
-        # Layer 2: Replace LLM safety refusals with ATLAS branded message
         if is_safety_refusal(response):
             return ATLAS_SAFETY_MESSAGE
 
@@ -230,15 +278,14 @@ class Agent:
 
     def _call_llm(self) -> str:
         """
-        Call Groq with the current conversation history.
+        Call Groq and log telemetry to the Cost Dashboard.
 
-        Groq uses the OpenAI-compatible chat completions API.
-        The system prompt goes as a system message, and conversation
-        history maps directly to the messages array.
-
-        Includes retry logic for rate limiting (30 RPM on free tier).
+        The telemetry capture happens here because this is the single
+        point where all LLM calls flow through. Every tool call, every
+        final answer — they all call _call_llm(). One integration point.
         """
         max_retries = 3
+        start_time = time.perf_counter()
 
         for attempt in range(max_retries):
             try:
@@ -248,7 +295,21 @@ class Agent:
                     temperature=0.1,
                     max_tokens=1024,
                 )
-                return response.choices[0].message.content.strip()
+
+                latency_ms = int((time.perf_counter() - start_time) * 1000)
+                result_text = response.choices[0].message.content.strip()
+
+                # Send telemetry (non-blocking, never crashes the agent)
+                usage = response.usage
+                if usage:
+                    _send_telemetry(
+                        input_tokens=usage.prompt_tokens,
+                        output_tokens=usage.completion_tokens,
+                        latency_ms=latency_ms,
+                        feature="agent",
+                    )
+
+                return result_text
 
             except Exception as e:
                 error_str = str(e)
@@ -257,19 +318,22 @@ class Agent:
                     print(f"  [Rate limited — waiting {wait_time}s, retry {attempt + 1}/{max_retries}]")
                     time.sleep(wait_time)
                 else:
+                    # Log failed call telemetry
+                    latency_ms = int((time.perf_counter() - start_time) * 1000)
+                    _send_telemetry(
+                        input_tokens=0,
+                        output_tokens=0,
+                        latency_ms=latency_ms,
+                        feature="agent",
+                        status="error",
+                        error_message=error_str[:200],
+                    )
                     return f"FINAL_ANSWER: I encountered an error: {error_str}"
 
         return "FINAL_ANSWER: I'm temporarily rate limited. Please try again in a minute."
 
     def _build_messages(self) -> list[dict]:
-        """
-        Build the messages array for Groq's chat completions API.
-
-        Groq uses the OpenAI format:
-        - {"role": "system", "content": "..."} for the system prompt
-        - {"role": "user", "content": "..."} for user messages
-        - {"role": "assistant", "content": "..."} for assistant messages
-        """
+        """Build the messages array for Groq's chat completions API."""
         messages = [
             {"role": "system", "content": self.system_prompt}
         ]
