@@ -1,14 +1,8 @@
 """
 Configuration for the AI Agent.
 
-Switched from Google Gemini to Groq in Phase 4.
-Why? Gemini's free tier caps at 20 RPD on some accounts, making it
-impossible to run a 28-test eval suite. Groq offers 30 RPM and
-14,400 RPD on the free tier — no credit card required.
-
-Groq runs open-source models (Llama, Mixtral) on custom LPU hardware,
-delivering sub-second inference. We use Llama 3.3 70B which is strong
-at structured output and tool-calling patterns.
+Uses Groq (Qwen 3.6 27B) for LLM inference.
+Optionally sends telemetry to the AI Cost Dashboard.
 """
 
 import os
@@ -27,3 +21,15 @@ MAX_STEPS = 10
 TOOL_CALL_PREFIX = "TOOL_CALL:"
 TOOL_INPUT_PREFIX = "INPUT:"
 FINAL_ANSWER_PREFIX = "FINAL_ANSWER:"
+
+# --- Cost Dashboard Telemetry ---
+# When both are set, every Groq call is logged to the AI Cost Dashboard.
+# When either is missing, telemetry is silently disabled — the agent
+# works fine without it. Same graceful fallback pattern as the RAG project.
+COST_DASHBOARD_API_KEY = os.getenv("COST_DASHBOARD_API_KEY")
+COST_DASHBOARD_ENDPOINT = os.getenv("COST_DASHBOARD_ENDPOINT")
+
+# Qwen 3.6 27B pricing on Groq (as of August 2026)
+# Source: https://groq.com/pricing
+QWEN_INPUT_PRICE_PER_TOKEN = 0.60 / 1_000_000   # $0.60 per 1M tokens
+QWEN_OUTPUT_PRICE_PER_TOKEN = 3.00 / 1_000_000   # $3.00 per 1M tokens

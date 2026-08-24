@@ -2,3 +2,5 @@ groq==0.25.0
 python-dotenv==1.1.0
 requests==2.32.3
 pyyaml==6.0.2
+streamlit==1.45.0
+llm-cost-sdk @ git+https://github.com/abhi-00g/ai-cost-dashboard.git@main#subdirectory=sdk
