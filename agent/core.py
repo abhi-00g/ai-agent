@@ -1,16 +1,19 @@
 """
-Core Agent Loop — Phase 5
+Core Agent Loop — Phase 6 (Bug Fixes)
 
-Additions:
-- Telemetry: every Groq call is logged to the AI Cost Dashboard via
-  llm_cost_sdk. Token counts, latency, and cost are captured automatically.
-- Graceful fallback: if the dashboard is unconfigured or unreachable,
-  the agent works normally. Observability never breaks the application.
+Changes from Phase 5:
+- Creator bio: hardcoded professional facts, no web search hallucination
+- System prompt tells LLM to decline personal questions with a quirky one-liner
+- Empty/gibberish input handling
+- Conversation-ender detection
+- Think-tag capture (closed and unclosed) for UI expander
+- max_tokens bumped to 2048
 """
 
 import re
 import time
 import logging
+import random
 from groq import Groq
 from agent.config import (
     GROQ_API_KEY,
@@ -30,8 +33,6 @@ from agent.guardrails import Guardrails
 logger = logging.getLogger("atlas")
 
 # --- Telemetry Setup ---
-# Initialize the cost tracker only if dashboard credentials are configured.
-# This is the same pattern used in the RAG project — observability is opt-in.
 _cost_tracker = None
 
 if COST_DASHBOARD_API_KEY and COST_DASHBOARD_ENDPOINT:
@@ -59,12 +60,7 @@ def _send_telemetry(
     status: str = "success",
     error_message: str | None = None,
 ):
-    """
-    Send telemetry to the AI Cost Dashboard.
-
-    Calculates cost using Groq's pricing for Qwen 3.6 27B.
-    Never raises — if sending fails, it's logged and ignored.
-    """
+    """Send telemetry to the AI Cost Dashboard. Never raises."""
     if not _cost_tracker:
         return
 
@@ -88,12 +84,161 @@ def _send_telemetry(
         logger.debug(f"Telemetry send failed (non-critical): {e}")
 
 
+# ═══════════════════════════════════════════════════════════
+# CREATOR BIO — hardcoded facts, no web search needed
+# ═══════════════════════════════════════════════════════════
+
+CREATOR_BIO = {
+    "name": "Venkata Krishna Raj Abhishek Gade (Abhishek)",
+    "location": "Boston, Massachusetts",
+    "education": [
+        "MS in Software Engineering Systems at Northeastern University (GPA: 3.81, graduating December 2026)",
+        "BTech in Computer Science & Engineering from Gokaraju Rangaraju Institute of Engineering and Technology, Hyderabad, India (2020–2024)",
+    ],
+    "experience": [
+        "AI Engineer Intern at Solix Technologies, Inc. (Jan–May 2026) — built FAISS-based semantic search, RBAC auth systems, Playwright web crawlers, and deepfake detection pipelines",
+        "Software Engineering Intern at Rainier Softech Solutions (Jun–Dec 2023) — backend APIs with Node.js/PostgreSQL, Sequelize ORM optimization, Jest test suites",
+    ],
+    "projects": [
+        "ATLAS — this very agent you're talking to! Multi-tool AI agent with 5 tools, safety guardrails, and 59 unit tests",
+        "SyncBoard — real-time collaborative Kanban board with WebSocket sync, Redis pub/sub, and optimistic concurrency control",
+        "AI Cost & Token Observability Dashboard — LLM cost tracking platform with a Python SDK, FastAPI backend, and React dashboard",
+        "Intelligent Document Q&A — RAG pipeline with FAISS vector search, cross-encoder reranking, and Gemini 2.5 Flash",
+        "Cloud-Native Web App — multi-AZ AWS infrastructure with Terraform, Packer AMIs, and cross-account CI/CD",
+        "Smart Finance Tracker — personal finance app with budget tracking, recurring expense detection, and AI insights via Cohere",
+    ],
+    "skills": "Python, TypeScript, React, FastAPI, Node.js, PostgreSQL, Redis, AWS, Terraform, Docker, FAISS, LangChain, Gemini API, Groq",
+    "links": {
+        "portfolio": "https://portfolio-taupe-seven-64piyh5mxj.vercel.app/",
+        "github": "https://github.com/abhi-00g",
+        "linkedin": "https://www.linkedin.com/in/venkata-krishna-raj-abhishek-gade-717147230/",
+        "email": "gade.venk@northeastern.edu",
+    },
+}
+
+# Keywords that trigger creator bio lookup (direct mention only)
+CREATOR_KEYWORDS = [
+    "creator", "owner", "who made you", "who built you", "who created you",
+    "who designed you", "who is your maker", "your developer", "your builder",
+    "abhishek", "abhishek gade", "venkata", "gade",
+]
+
+# Conversation-enders
+EXIT_PHRASES = [
+    "bye", "goodbye", "no thanks", "no thank you", "nah", "i'm good",
+    "that's all", "thats all", "nothing", "nope", "i'm done", "im done",
+    "thanks bye", "thank you bye", "see ya", "later", "gtg",
+]
+
+
+def _is_creator_query(message: str) -> bool:
+    """Check if the message is directly asking about the creator."""
+    msg_lower = message.lower().strip()
+    return any(kw in msg_lower for kw in CREATOR_KEYWORDS)
+
+
+def _is_empty_or_gibberish(message: str) -> bool:
+    """Check if the message is empty, whitespace, or meaningless."""
+    cleaned = message.strip()
+    if not cleaned:
+        return True
+    if len(cleaned) <= 2 and not cleaned.isalpha():
+        return True
+    if len(set(cleaned.replace(" ", ""))) <= 1 and len(cleaned) > 1:
+        return True
+    return False
+
+
+def _is_conversation_ender(message: str) -> bool:
+    """Check if the user is wrapping up the conversation."""
+    msg_lower = message.lower().strip()
+    return msg_lower in EXIT_PHRASES
+
+
+def _build_creator_response(message: str) -> str:
+    """
+    Build a response about the creator from the hardcoded bio.
+    Only handles direct keyword matches (education, experience, etc.).
+    Anything that doesn't match a professional category → quirky redirect.
+    """
+    msg_lower = message.lower()
+    bio = CREATOR_BIO
+
+    # Education
+    if any(w in msg_lower for w in ["education", "university", "college", "degree", "school",
+                                      "study", "studied", "undergrad", "graduate", "learn",
+                                      "code", "coding", "program"]):
+        edu_text = "\n".join(f"• {e}" for e in bio["education"])
+        return f"Here's Abhishek's education:\n{edu_text}"
+
+    # Experience
+    if any(w in msg_lower for w in ["experience", "internship", "work", "job", "intern", "company"]):
+        exp_text = "\n".join(f"• {e}" for e in bio["experience"])
+        return f"Here's Abhishek's professional experience:\n{exp_text}"
+
+    # Projects
+    if any(w in msg_lower for w in ["project", "built", "portfolio", "made", "build"]):
+        proj_text = "\n".join(f"• {p}" for p in bio["projects"])
+        return f"Abhishek has built many projects:\n{proj_text}"
+
+    # Skills
+    if any(w in msg_lower for w in ["skill", "tech stack", "technology", "languages", "tools"]):
+        return f"Abhishek's tech stack: {bio['skills']}"
+
+    # Links
+    if any(w in msg_lower for w in ["link", "github", "linkedin", "contact", "email", "reach"]):
+        links = bio["links"]
+        return (
+            f"Here's how to reach Abhishek:\n"
+            f"• Portfolio: {links['portfolio']}\n"
+            f"• GitHub: {links['github']}\n"
+            f"• LinkedIn: {links['linkedin']}\n"
+            f"• Email: {links['email']}"
+        )
+
+    # Location
+    if any(w in msg_lower for w in ["based", "location", "city", "live"]):
+        return f"Abhishek is based in {bio['location']}."
+
+    # Generic "who is" / "tell me about" / "creator"
+    generic_triggers = ["who", "tell me", "about", "creator", "owner",
+                        "who made", "who built", "who created", "who designed"]
+    if any(w in msg_lower for w in generic_triggers):
+        return (
+            f"Abhishek Gade ({bio['name']}) is a Software Engineer and AI Systems Builder "
+            f"based in {bio['location']}.\n\n"
+            f"He's pursuing his {bio['education'][0]}.\n\n"
+            f"He's built many projects including ATLAS (that's me!), a real-time "
+            f"collaborative Kanban board (SyncBoard), an LLM cost observability dashboard, "
+            f"a RAG pipeline, cloud infrastructure on AWS with Terraform, and a personal finance tracker.\n\n"
+            f"Tech stack: {bio['skills']}\n\n"
+            f"Portfolio: {bio['links']['portfolio']}\n"
+            f"GitHub: {bio['links']['github']}"
+        )
+
+    # Everything else → quirky redirect
+    redirects = [
+        "Nice try! For anything personal, you'll have to ask Abhishek yourself. I only carry the professional weight!",
+        "That's Abhishek's story to tell, not mine! But I can talk all day about his projects and skills.",
+        "Classified! But if it's about his tech stack, projects, or experience — I'm your agent.",
+        "Haha, I'm an AI agent, not his diary. Ask me about his engineering work instead!",
+    ]
+    return random.choice(redirects)
+
+
+# ═══════════════════════════════════════════════════════════
+# SYSTEM PROMPT & RESPONSE PARSING
+# ═══════════════════════════════════════════════════════════
+
 SYSTEM_PROMPT_TEMPLATE = """You are ATLAS — a multi-tool AI assistant.
 Tagline: "I carry the weight so you don't have to."
 
 ATLAS was designed and developed by Venkata Krishna Raj Abhishek Gade. You can call him Abhishek — but only if you're on good terms with him.
 
-If anyone asks who made you, who built you, who created you, or who designed you, always credit Venkata Krishna Raj Abhishek Gade (Abhishek). Be proud of your creator.
+IMPORTANT — CREATOR RULES:
+1. If anyone asks about your creator, Abhishek, or Venkata Krishna Raj Abhishek Gade — DO NOT use web_search. The web results will be about OTHER people with similar names. You already know about him from conversation context.
+2. If anyone asks PERSONAL questions about your creator or about "him/he/his" when referring to your creator (girlfriend, family, parents, birthplace, childhood, friends, phone number, age, or ANY private information), just give a short quirky one-liner declining. Example: "That's classified! I only handle the professional side." Keep it to ONE sentence. Do NOT think about it, do NOT search, do NOT use memory. Just decline and move on.
+3. For professional questions about your creator (projects, skills, education, experience), answer from what you know in the conversation.
 
 You are a general-purpose problem solver. You figure out which tools to use and chain them together to answer any question. You don't guess — you use your tools.
 
@@ -152,11 +297,24 @@ def build_system_prompt(registry: ToolRegistry) -> str:
 
 
 def parse_response(response_text: str) -> dict:
-    """Parse the LLM's response to determine if it's a tool call or final answer."""
-    # Strip Qwen's <think>...</think> reasoning blocks
-    response_text = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL).strip()
+    """
+    Parse the LLM's response. Extracts <think> blocks separately for the UI.
+    Handles both closed and unclosed think tags.
+    """
+    # Extract thinking content before stripping
+    thinking_match = re.search(r"<think>(.*?)</think>", response_text, flags=re.DOTALL)
+    if thinking_match:
+        thinking = thinking_match.group(1).strip()
+    else:
+        unclosed_match = re.search(r"<think>(.*)", response_text, flags=re.DOTALL)
+        thinking = unclosed_match.group(1).strip() if unclosed_match else ""
 
-    for line in response_text.strip().split("\n"):
+    # Strip both closed and unclosed thinking blocks
+    clean_text = re.sub(r"<think>.*?</think>", "", response_text, flags=re.DOTALL)
+    clean_text = re.sub(r"<think>.*", "", clean_text, flags=re.DOTALL)
+    clean_text = clean_text.strip()
+
+    for line in clean_text.strip().split("\n"):
         line = line.strip()
 
         if line.startswith(TOOL_CALL_PREFIX):
@@ -172,18 +330,19 @@ def parse_response(response_text: str) -> dict:
                         "type": "tool_call",
                         "tool": tool_name,
                         "input": tool_input,
+                        "thinking": thinking,
                     }
 
         if line.startswith(FINAL_ANSWER_PREFIX):
             content = line[len(FINAL_ANSWER_PREFIX):].strip()
 
-            idx = response_text.find(line)
+            idx = clean_text.find(line)
             if idx != -1:
-                content = response_text[idx + len(FINAL_ANSWER_PREFIX):].strip()
+                content = clean_text[idx + len(FINAL_ANSWER_PREFIX):].strip()
 
-            return {"type": "final_answer", "content": content}
+            return {"type": "final_answer", "content": content, "thinking": thinking}
 
-    return {"type": "unknown", "content": response_text}
+    return {"type": "unknown", "content": clean_text, "thinking": thinking}
 
 
 class Agent:
@@ -204,13 +363,33 @@ class Agent:
         self.system_prompt = build_system_prompt(self.registry)
         self.guardrails = Guardrails()
         self.conversation_history: list[dict] = []
+        self.last_thinking: str = ""
 
     def chat(self, user_message: str) -> str:
         """Send a message to ATLAS and get a response."""
+        self.last_thinking = ""
+
+        # Empty or gibberish
+        if _is_empty_or_gibberish(user_message):
+            return "I didn't quite catch that. Could you try rephrasing?"
+
+        # Conversation-ender
+        if _is_conversation_ender(user_message):
+            return "Alright, I'm here if you need me. Go build something great! 🌍"
+
+        # Direct creator query (keyword match only)
+        if _is_creator_query(user_message):
+            response = _build_creator_response(user_message)
+            self.conversation_history.append({"role": "user", "content": user_message})
+            self.conversation_history.append({"role": "assistant", "content": response})
+            return response
+
+        # Guardrails
         guardrail_result = self.guardrails.check(user_message)
         if guardrail_result["blocked"]:
             return guardrail_result["message"]
 
+        # Normal LLM flow
         self.conversation_history.append({
             "role": "user",
             "content": user_message,
@@ -224,12 +403,15 @@ class Agent:
         return response
 
     def _run_agent_loop(self) -> str:
-        """The core loop — unchanged from Phase 1."""
+        """The core loop."""
         steps = 0
 
         while steps < MAX_STEPS:
             response = self._call_llm()
             parsed = parse_response(response)
+
+            if parsed.get("thinking"):
+                self.last_thinking = parsed["thinking"]
 
             if parsed["type"] == "final_answer":
                 self.conversation_history.append({
@@ -277,13 +459,7 @@ class Agent:
         return self._force_final_answer()
 
     def _call_llm(self) -> str:
-        """
-        Call Groq and log telemetry to the Cost Dashboard.
-
-        The telemetry capture happens here because this is the single
-        point where all LLM calls flow through. Every tool call, every
-        final answer — they all call _call_llm(). One integration point.
-        """
+        """Call Groq and log telemetry."""
         max_retries = 3
         start_time = time.perf_counter()
 
@@ -293,13 +469,12 @@ class Agent:
                     model=GROQ_MODEL,
                     messages=self._build_messages(),
                     temperature=0.1,
-                    max_tokens=1024,
+                    max_tokens=2048,
                 )
 
                 latency_ms = int((time.perf_counter() - start_time) * 1000)
                 result_text = response.choices[0].message.content.strip()
 
-                # Send telemetry (non-blocking, never crashes the agent)
                 usage = response.usage
                 if usage:
                     _send_telemetry(
@@ -318,7 +493,6 @@ class Agent:
                     print(f"  [Rate limited — waiting {wait_time}s, retry {attempt + 1}/{max_retries}]")
                     time.sleep(wait_time)
                 else:
-                    # Log failed call telemetry
                     latency_ms = int((time.perf_counter() - start_time) * 1000)
                     _send_telemetry(
                         input_tokens=0,
@@ -360,6 +534,9 @@ class Agent:
         response = self._call_llm()
         parsed = parse_response(response)
 
+        if parsed.get("thinking"):
+            self.last_thinking = parsed["thinking"]
+
         self.conversation_history.append({
             "role": "assistant",
             "content": response,
@@ -372,3 +549,4 @@ class Agent:
     def reset(self):
         """Clear conversation history to start a fresh session."""
         self.conversation_history = []
+        self.last_thinking = ""
