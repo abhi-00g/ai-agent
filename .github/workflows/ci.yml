@@ -26,6 +26,8 @@ jobs:
           pip install pytest
 
       - name: Run unit tests
+        env:
+          PUBLIC_DEMO: "false"
         run: pytest tests/ -v
 
       # Note: The eval harness (run_eval.py) is NOT run in CI because
