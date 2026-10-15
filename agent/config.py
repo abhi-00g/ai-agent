@@ -1,7 +1,7 @@
 """
 Configuration for the AI Agent.
 
-Uses Groq (Qwen 3.6 27B) for LLM inference.
+Uses Groq (LLaMA 3.3 70B) for LLM inference.
 Optionally sends telemetry to the AI Cost Dashboard.
 """
 
@@ -12,7 +12,7 @@ load_dotenv()
 
 # --- LLM Settings ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = "qwen/qwen3.6-27b"
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # --- Agent Settings ---
 MAX_STEPS = 10
@@ -33,6 +33,6 @@ FINAL_ANSWER_PREFIX = "FINAL_ANSWER:"
 COST_DASHBOARD_API_KEY = os.getenv("COST_DASHBOARD_API_KEY")
 COST_DASHBOARD_ENDPOINT = os.getenv("COST_DASHBOARD_ENDPOINT")
 
-# Qwen 3.6 27B pricing on Groq (as of August 2026)
-QWEN_INPUT_PRICE_PER_TOKEN = 0.60 / 1_000_000
-QWEN_OUTPUT_PRICE_PER_TOKEN = 3.00 / 1_000_000
+# LLaMA 3.3 70B pricing on Groq (as of October 2026)
+LLAMA_INPUT_PRICE_PER_TOKEN = 0.59 / 1_000_000
+LLAMA_OUTPUT_PRICE_PER_TOKEN = 0.79 / 1_000_000
