@@ -12,7 +12,7 @@ load_dotenv()
 
 # --- LLM Settings ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = "mixtral-8x7b-32768"
+GROQ_MODEL = "openai/gpt-oss-120b"
 
 # --- Agent Settings ---
 MAX_STEPS = 10
